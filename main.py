@@ -1,3 +1,4 @@
+import sqlite3
 from typing import Annotated, Sequence, Literal
 from typing_extensions import TypedDict
 from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
@@ -7,27 +8,33 @@ from langchain_ollama import ChatOllama
 from langchain_core.tools import tool
 from langgraph.prebuilt import ToolNode
 
+# ۱. وارد کردن ماژول حافظه محلی
+from langgraph.checkpoint.memory import MemorySaver 
+
 class AgentState(TypedDict):
     messages: Annotated[Sequence[BaseMessage], add_messages]
 
-# ۱. تعریف ابزار با دکوراتور @tool (توضیحات تابع برای فهم مدل بسیار مهم است)
 @tool
-def get_server_status(server_name: str) -> str:
+def check_server_db(server_name: str) -> str:
     """
-    Get the current status of a specific server.
+    Query the database to get the real-time status of a server.
     Args:
-        server_name (str): The exact name of the server to check. Examples: 'web', 'database'.
+        server_name (str): The exact name of the server to check. Examples: 'web', 'database', 'cache'.
     """
-    statuses = {
-        "database": "سرور دیتابیس آنلاین است و پینگ آن 12ms است.",
-        "web": "سرور وب آفلاین است (خطای 502)."
-    }
-    return statuses.get(server_name.lower(), "سروری با این نام یافت نشد.")
+    conn = sqlite3.connect('company.db')
+    cursor = conn.cursor()
+    cursor.execute("SELECT ip_address, status, cpu_load FROM servers WHERE name = ?", (server_name.lower(),))
+    result = cursor.fetchone()
+    conn.close()
+    
+    if result:
+        ip, status, cpu = result
+        return f"Server Found! IP: {ip}, Status: {status}, CPU Load: {cpu}"
+    else:
+        return "Server not found in the database."
 
-# لیست ابزارهای در دسترس ایجنت
-tools = [get_server_status]
+tools = [check_server_db]
 
-# ۲. معرفی مدل و Bind کردن ابزارها به آن
 model = ChatOllama(
     model="qwen2.5:1.5b",
     temperature=0
@@ -36,53 +43,53 @@ model = ChatOllama(
 def call_model(state: AgentState):
     messages = state["messages"]
     system_prompt = SystemMessage(
-        content="""You are an AI tool-calling assistant. 
-        You MUST use the 'get_server_status' tool to answer.
-        CRITICAL INSTRUCTION: Extract the server name directly from the user's prompt. 
-        If the user says "web", pass "web" as the server_name parameter. 
-        If the user says "database", pass "database" as the server_name parameter.
-        DO NOT ask the user for the server name. Extract it yourself!"""
+        content="""You are an IT assistant connected to a live database.
+        You MUST ALWAYS use the 'check_server_db' tool to fetch information if the user asks about a server.
+        CRITICAL: Extract the server name from the user's message (e.g. "web", "database", "cache") and pass it to the tool.
+        DO NOT guess the IP or status. Use the database!"""
     )
-    response = model.invoke(messages)
+    response = model.invoke([system_prompt] + list(messages))
     return {"messages": [response]}
 
-# ۳. تابع مسیریاب (لبه شرطی)
 def should_continue(state: AgentState) -> Literal["tools", END]:
     messages = state["messages"]
     last_message = messages[-1]
-    # اگر مدل تصمیم گرفته ابزاری را صدا بزند، مسیر را به نود tools بفرست
     if last_message.tool_calls:
         return "tools"
-    # در غیر این صورت کار تمام است
     return END
 
-# ۴. ساخت گراف
 workflow = StateGraph(AgentState)
-
-# اضافه کردن نود مدل و نود از پیش ساخته‌شده‌ی ابزارها
 workflow.add_node("agent", call_model)
 workflow.add_node("tools", ToolNode(tools))
 
-# ۵. اتصال نودها و رسم مسیر جریان
 workflow.add_edge(START, "agent")
 workflow.add_conditional_edges("agent", should_continue)
-workflow.add_edge("tools", "agent") # بعد از اجرای ابزار، نتیجه به مدل برمی‌گردد
+workflow.add_edge("tools", "agent")
 
-app = workflow.compile()
+# ۲. ساخت یک شیء حافظه و اتصال آن به گراف در زمان کامپایل
+memory = MemorySaver()
+app = workflow.compile(checkpointer=memory)
 
 if __name__ == "__main__":
-    print("🤖 ایجنت هوشمند بیدار شد! (برای خروج 'exit' را تایپ کنید)")
+    print("🤖 ایجنت متصل به دیتابیس (با حافظه فعال) بیدار شد!")
+    
+    # ۳. تعریف یک شناسه یکتا (Thread ID) برای این مکالمه
+    config = {"configurable": {"thread_id": "session_1"}}
+    
     while True:
         user_input = input("\nشما: ")
         if user_input.lower() in ["exit", "خروج"]:
             break
             
         inputs = {"messages": [HumanMessage(content=user_input)]}
-        for chunk in app.stream(inputs, stream_mode="values"):
+        
+        # ۴. پاس دادن تنظیمات (شامل شناسه مکالمه) به جریان اجرای گراف
+        for chunk in app.stream(inputs, config=config, stream_mode="values"):
             last_msg = chunk["messages"][-1]
             
-            # چاپ لاگ برای درک بهتر جریان کار ایجنت
             if last_msg.type == "ai" and last_msg.tool_calls:
-                print(f"⚙️ [ایجنت در حال استفاده از ابزار {last_msg.tool_calls[0]['name']} است...]")
+                tool_name = last_msg.tool_calls[0]['name']
+                arg_value = last_msg.tool_calls[0]['args'].get('server_name', 'نامشخص')
+                print(f"🔍 [ایجنت در حال جستجوی '{arg_value}'...]")
             elif last_msg.type == "ai" and not last_msg.tool_calls:
                 print(f"ایجنت: {last_msg.content}")
