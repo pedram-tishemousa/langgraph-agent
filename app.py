@@ -13,7 +13,7 @@ if "messages" not in st.session_state:
     
 # یک شناسه یکتا برای اتصال حافظه گراف به این سشن وب
 if "thread_id" not in st.session_state:
-    st.session_state.thread_id = "web_session_1"
+    st.session_state.thread_id = "web_session_2"
 
 # ۲. نمایش پیام‌های قبلی در صفحه
 for msg in st.session_state.messages:
